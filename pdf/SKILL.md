@@ -27,6 +27,10 @@ inputs:
     type: string
     required: false
     description: "URL of the input PDF file to process"
+  file_base64:
+    type: string
+    required: false
+    description: "Base64-encoded PDF file content — use this instead of file_url when the file cannot be fetched via URL"
   file_urls:
     type: string
     required: false
