@@ -1,11 +1,16 @@
 ---
 name: pdf
 description: >
-  Use this skill whenever the user wants to do anything with PDF files. This includes reading or
-  extracting text/tables from PDFs, combining or merging multiple PDFs into one, splitting PDFs
-  apart, rotating pages, adding watermarks, creating new PDFs, filling PDF forms,
-  encrypting/decrypting PDFs, extracting images, and OCR on scanned PDFs to make them searchable.
+  Use this skill whenever the user wants to do anything with PDF files. This includes reading,
+  analysing, or extracting text/tables from PDFs, combining or merging multiple PDFs into one,
+  splitting PDFs apart, rotating pages, adding watermarks, creating new PDFs, filling PDF forms,
+  encrypting/decrypting PDFs, extracting images, and OCR on scanned PDFs.
   If the user mentions a .pdf file or asks to produce one, use this skill.
+  ALWAYS set the `task` field: use "extract_text" when the user uploads a PDF and wants to read,
+  analyse, or extract data from it; use "create" to generate a new PDF; use "merge" to combine
+  PDFs; use "split" to extract pages; use "rotate" to rotate pages; use "watermark" to stamp text;
+  use "encrypt" or "decrypt" for password operations.
+  The `file_url` must be set to the exact URL of the uploaded PDF — do NOT guess or construct URLs.
 license: Proprietary. LICENSE.txt has complete terms
 category: productivity
 version: "1.0.0"
