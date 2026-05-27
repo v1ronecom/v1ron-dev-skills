@@ -398,24 +398,45 @@ TASK_ALIASES = {
     "unlock": "decrypt",
 }
 
+def _collect_urls(inputs: dict) -> list[str]:
+    """Gather all URL strings from every field the app might use for attachments."""
+    urls: list[str] = []
+    candidate_fields = [
+        "image_urls", "file_url", "file_urls", "pdf_url", "pdf_urls",
+        "attachments", "references", "files", "documents", "urls",
+    ]
+    for field in candidate_fields:
+        val = inputs.get(field)
+        if not val:
+            continue
+        if isinstance(val, list):
+            urls.extend(str(v) for v in val if v)
+        elif isinstance(val, str):
+            urls.extend(u.strip() for u in val.replace("\n", ",").split(",") if u.strip())
+    return urls
+
+
 def main():
     inputs = json.loads(sys.stdin.read())
+
+    # Debug: show every key the app sent so we can diagnose missing fields
+    think(f"Input fields received: {list(inputs.keys())}")
+
     raw_task = (inputs.get("task") or "").strip().lower().replace(" ", "_")
     task = TASK_ALIASES.get(raw_task, raw_task)
 
     content = (inputs.get("content") or "").strip()
 
-    # Primary explicit field
-    file_url = (inputs.get("file_url") or "").strip()
+    # Collect all URLs from every possible attachment field
+    all_urls = _collect_urls(inputs)
+    think(f"All URLs found in inputs: {all_urls}")
 
-    # Uploaded attachments come through image_urls — extract any PDF URLs
-    image_urls: list = inputs.get("image_urls") or []
-    if isinstance(image_urls, str):
-        image_urls = [u.strip() for u in image_urls.split(",") if u.strip()]
-    attached_pdfs = [u for u in image_urls if u.lower().split("?")[0].endswith(".pdf")]
+    attached_pdfs = [u for u in all_urls if ".pdf" in u.lower().split("?")[0]]
+
+    file_url = (inputs.get("file_url") or "").strip()
     if not file_url and attached_pdfs:
         file_url = attached_pdfs[0]
-        think(f"Using attached PDF: {file_url}")
+        think(f"PDF resolved from attachments: {file_url}")
 
     file_urls_raw = (inputs.get("file_urls") or "").strip()
     file_urls = [u.strip() for u in file_urls_raw.split(",") if u.strip()] if file_urls_raw else []
