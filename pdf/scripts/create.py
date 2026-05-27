@@ -369,13 +369,59 @@ MIME = {
     ".zip": "application/zip",
 }
 
+TASK_ALIASES = {
+    # extract family
+    "extract": "extract_text",
+    "extract_text": "extract_text",
+    "extract_images": "extract_text",
+    "extract_data": "extract_text",
+    "extract_text_and_images": "extract_text",
+    "read": "extract_text",
+    "analyse": "extract_text",
+    "analyze": "extract_text",
+    "analysis": "extract_text",
+    "phan_tich": "extract_text",
+    "trich_xuat": "extract_text",
+    "trich_xuat_du_lieu": "extract_text",
+    # other tasks
+    "create": "create",
+    "generate": "create",
+    "merge": "merge",
+    "combine": "merge",
+    "split": "split",
+    "rotate": "rotate",
+    "watermark": "watermark",
+    "stamp": "watermark",
+    "encrypt": "encrypt",
+    "protect": "encrypt",
+    "decrypt": "decrypt",
+    "unlock": "decrypt",
+}
+
 def main():
     inputs = json.loads(sys.stdin.read())
-    task = (inputs.get("task") or "").strip().lower().replace(" ", "_")
+    raw_task = (inputs.get("task") or "").strip().lower().replace(" ", "_")
+    task = TASK_ALIASES.get(raw_task, raw_task)
+
     content = (inputs.get("content") or "").strip()
+
+    # Primary explicit field
     file_url = (inputs.get("file_url") or "").strip()
+
+    # Uploaded attachments come through image_urls — extract any PDF URLs
+    image_urls: list = inputs.get("image_urls") or []
+    if isinstance(image_urls, str):
+        image_urls = [u.strip() for u in image_urls.split(",") if u.strip()]
+    attached_pdfs = [u for u in image_urls if u.lower().split("?")[0].endswith(".pdf")]
+    if not file_url and attached_pdfs:
+        file_url = attached_pdfs[0]
+        think(f"Using attached PDF: {file_url}")
+
     file_urls_raw = (inputs.get("file_urls") or "").strip()
     file_urls = [u.strip() for u in file_urls_raw.split(",") if u.strip()] if file_urls_raw else []
+    if not file_urls and len(attached_pdfs) > 1:
+        file_urls = attached_pdfs
+
     pages_spec = (inputs.get("pages") or "").strip() or None
     password = (inputs.get("password") or "").strip()
 
@@ -394,7 +440,7 @@ def main():
             task = "create"
             think("Task not specified — defaulting to create (content present)")
         else:
-            fail("Please specify a task: create, extract_text, merge, split, rotate, encrypt, decrypt, or watermark")
+            fail("Please upload a PDF or describe what you'd like to create.")
 
     think(f"Task: {task}")
 
