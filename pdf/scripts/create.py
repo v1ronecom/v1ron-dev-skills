@@ -22,36 +22,57 @@ def fail(msg: str) -> None:
     sys.exit(1)
 
 # ── File helpers ───────────────────────────────────────────────────────────────
-def _internal_url(url: str) -> str | None:
-    """Rewrite a public media URL to the internal app URL."""
+def _candidate_urls(url: str) -> list[str]:
+    """Build a list of URLs to try in order: public → internal variants."""
     import urllib.parse
     parsed = urllib.parse.urlparse(url)
-    if parsed.path.startswith("/media/"):
-        return f"{APP_URL}{parsed.path}"
-    return None
+    path = parsed.path  # e.g. /media/references/abc123.pdf
+    file_hash = os.path.splitext(os.path.basename(path))[0]  # abc123
+    candidates = [url]
+    if path.startswith("/media/"):
+        # Direct internal mirror of the public URL
+        candidates.append(f"{APP_URL}{path}")
+        # Internal API patterns the v1ron app might expose
+        candidates.append(f"{APP_URL}/api/v1/internal/files/{file_hash}")
+        candidates.append(f"{APP_URL}/api/v1/internal/references/{file_hash}/download/")
+        candidates.append(f"{APP_URL}/api/v1/internal/media{path}")
+    return candidates
 
 def fetch_url(url: str, suffix: str = ".pdf") -> str:
     fd, path = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
-    candidates = [url]
-    alt = _internal_url(url)
-    if alt and alt != url:
-        candidates.append(alt)
     last_exc: Exception = RuntimeError("No URL to fetch")
-    for candidate in candidates:
+    for candidate in _candidate_urls(url):
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
-            if candidate.startswith(APP_URL) and MCP_KEY:
+            if APP_URL and candidate.startswith(APP_URL) and MCP_KEY:
                 headers["X-MCP-Key"] = MCP_KEY
             req = urllib.request.Request(candidate, headers=headers)
-            with urllib.request.urlopen(req, timeout=30) as r, open(path, "wb") as f:
-                f.write(r.read())
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read()
+            if len(data) < 5 or data[:4] not in (b"%PDF", b"\x89PNG", b"\xff\xd8\xff"):
+                # Not a real file (e.g. JSON error body from API)
+                last_exc = RuntimeError(f"Response from {candidate} is not a PDF ({len(data)} bytes)")
+                continue
+            with open(path, "wb") as f:
+                f.write(data)
+            think(f"Fetched PDF from: {candidate} ({len(data):,} bytes)")
             return path
         except Exception as exc:
             last_exc = exc
             continue
     os.unlink(path)
-    raise RuntimeError(f"Failed to fetch PDF (tried {len(candidates)} URL(s)): {last_exc}")
+    raise RuntimeError(f"Could not fetch the PDF. The file may not be publicly accessible. "
+                       f"Last error: {last_exc}")
+
+def save_base64(b64: str, suffix: str = ".pdf") -> str:
+    """Write base64-encoded file content to a temp file and return the path."""
+    import base64 as b64mod
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    with open(path, "wb") as f:
+        f.write(b64mod.b64decode(b64))
+    return path
 
 # ── LLM helper ────────────────────────────────────────────────────────────────
 def call_llm(messages: list[dict]) -> str:
@@ -154,14 +175,17 @@ def task_create(content: str, options: dict) -> tuple[bytes, str]:
     return buf.read(), f"{safe}.pdf"
 
 # ── Task: extract text ────────────────────────────────────────────────────────
-def task_extract_text(file_url: str, pages_spec: str | None, options: dict) -> tuple[bytes, str]:
+def task_extract_text(file_url: str, pages_spec: str | None, options: dict, preloaded: str | None = None) -> tuple[bytes, str]:
     try:
         import pdfplumber
     except ImportError:
         fail("pdfplumber not installed — run: pip install pdfplumber")
 
-    think(f"Downloading PDF from {file_url}...")
-    path = fetch_url(file_url)
+    if preloaded:
+        path, owned = preloaded, True
+    else:
+        think(f"Downloading PDF...")
+        path, owned = fetch_url(file_url), True
     try:
         think("Extracting text...")
         lines = []
@@ -206,15 +230,18 @@ def task_merge(file_urls: list[str], options: dict) -> tuple[bytes, str]:
                 pass
 
 # ── Task: split PDF ───────────────────────────────────────────────────────────
-def task_split(file_url: str, pages_spec: str | None, options: dict) -> tuple[bytes, str]:
+def task_split(file_url: str, pages_spec: str | None, options: dict, preloaded: str | None = None) -> tuple[bytes, str]:
     try:
         from pypdf import PdfWriter, PdfReader
         import zipfile
     except ImportError:
         fail("pypdf not installed — run: pip install pypdf")
 
-    think(f"Downloading PDF...")
-    path = fetch_url(file_url)
+    if preloaded:
+        path = preloaded
+    else:
+        think(f"Downloading PDF...")
+        path = fetch_url(file_url)
     try:
         reader = PdfReader(path)
         total = len(reader.pages)
@@ -246,15 +273,18 @@ def task_split(file_url: str, pages_spec: str | None, options: dict) -> tuple[by
         os.unlink(path)
 
 # ── Task: rotate pages ────────────────────────────────────────────────────────
-def task_rotate(file_url: str, pages_spec: str | None, options: dict) -> tuple[bytes, str]:
+def task_rotate(file_url: str, pages_spec: str | None, options: dict, preloaded: str | None = None) -> tuple[bytes, str]:
     try:
         from pypdf import PdfWriter, PdfReader
     except ImportError:
         fail("pypdf not installed — run: pip install pypdf")
 
     rotation = int(options.get("rotation", 90))
-    think(f"Downloading PDF...")
-    path = fetch_url(file_url)
+    if preloaded:
+        path = preloaded
+    else:
+        think(f"Downloading PDF...")
+        path = fetch_url(file_url)
     try:
         reader = PdfReader(path)
         total = len(reader.pages)
@@ -272,7 +302,7 @@ def task_rotate(file_url: str, pages_spec: str | None, options: dict) -> tuple[b
         os.unlink(path)
 
 # ── Task: encrypt ─────────────────────────────────────────────────────────────
-def task_encrypt(file_url: str, password: str, options: dict) -> tuple[bytes, str]:
+def task_encrypt(file_url: str, password: str, options: dict, preloaded: str | None = None) -> tuple[bytes, str]:
     try:
         from pypdf import PdfWriter, PdfReader
     except ImportError:
@@ -280,8 +310,11 @@ def task_encrypt(file_url: str, password: str, options: dict) -> tuple[bytes, st
 
     if not password:
         fail("password is required for encrypt task")
-    think("Downloading PDF...")
-    path = fetch_url(file_url)
+    if preloaded:
+        path = preloaded
+    else:
+        think("Downloading PDF...")
+        path = fetch_url(file_url)
     try:
         reader = PdfReader(path)
         writer = PdfWriter()
@@ -296,7 +329,7 @@ def task_encrypt(file_url: str, password: str, options: dict) -> tuple[bytes, st
         os.unlink(path)
 
 # ── Task: decrypt ─────────────────────────────────────────────────────────────
-def task_decrypt(file_url: str, password: str, options: dict) -> tuple[bytes, str]:
+def task_decrypt(file_url: str, password: str, options: dict, preloaded: str | None = None) -> tuple[bytes, str]:
     try:
         from pypdf import PdfWriter, PdfReader
     except ImportError:
@@ -304,8 +337,11 @@ def task_decrypt(file_url: str, password: str, options: dict) -> tuple[bytes, st
 
     if not password:
         fail("password is required for decrypt task")
-    think("Downloading PDF...")
-    path = fetch_url(file_url)
+    if preloaded:
+        path = preloaded
+    else:
+        think("Downloading PDF...")
+        path = fetch_url(file_url)
     try:
         reader = PdfReader(path)
         if reader.is_encrypted:
@@ -321,7 +357,7 @@ def task_decrypt(file_url: str, password: str, options: dict) -> tuple[bytes, st
         os.unlink(path)
 
 # ── Task: watermark ────────────────────────────────────────────────────────────
-def task_watermark(file_url: str, options: dict) -> tuple[bytes, str]:
+def task_watermark(file_url: str, options: dict, preloaded: str | None = None) -> tuple[bytes, str]:
     try:
         from pypdf import PdfWriter, PdfReader
         from reportlab.lib.pagesizes import letter
@@ -347,8 +383,11 @@ def task_watermark(file_url: str, options: dict) -> tuple[bytes, str]:
     wm_buf.seek(0)
     wm_page = PdfReader(wm_buf).pages[0]
 
-    think("Downloading PDF and applying watermark...")
-    path = fetch_url(file_url)
+    if preloaded:
+        path = preloaded
+    else:
+        think("Downloading PDF and applying watermark...")
+        path = fetch_url(file_url)
     try:
         reader = PdfReader(path)
         writer = PdfWriter()
@@ -426,6 +465,7 @@ def main():
     task = TASK_ALIASES.get(raw_task, raw_task)
 
     content = (inputs.get("content") or "").strip()
+    file_base64 = (inputs.get("file_base64") or "").strip()
 
     # Collect all URLs from every possible attachment field
     all_urls = _collect_urls(inputs)
@@ -454,9 +494,9 @@ def main():
 
     # Infer task when the AI didn't set it explicitly
     if not task:
-        if file_url or file_urls:
+        if file_url or file_urls or file_base64:
             task = "extract_text"
-            think("Task not specified — defaulting to extract_text (file URL present)")
+            think("Task not specified — defaulting to extract_text (file present)")
         elif content:
             task = "create"
             think("Task not specified — defaulting to create (content present)")
@@ -471,40 +511,46 @@ def main():
         file_bytes, filename = task_create(content, options)
 
     elif task in ("extract_text", "extract"):
-        if not file_url:
-            fail("file_url is required for task=extract_text")
-        file_bytes, filename = task_extract_text(file_url, pages_spec, options)
+        if not file_url and not file_base64:
+            fail("A PDF file is required for task=extract_text — upload a file or provide file_url")
+        preloaded = save_base64(file_base64) if file_base64 else None
+        file_bytes, filename = task_extract_text(file_url, pages_spec, options, preloaded)
 
     elif task == "merge":
         urls = file_urls or ([file_url] if file_url else [])
-        if len(urls) < 2:
+        if len(urls) < 2 and not file_base64:
             fail("At least 2 URLs required for task=merge (use file_urls or file_url)")
         file_bytes, filename = task_merge(urls, options)
 
     elif task == "split":
-        if not file_url:
-            fail("file_url is required for task=split")
-        file_bytes, filename = task_split(file_url, pages_spec, options)
+        if not file_url and not file_base64:
+            fail("A PDF file is required for task=split")
+        preloaded = save_base64(file_base64) if file_base64 else None
+        file_bytes, filename = task_split(file_url, pages_spec, options, preloaded)
 
     elif task == "rotate":
-        if not file_url:
-            fail("file_url is required for task=rotate")
-        file_bytes, filename = task_rotate(file_url, pages_spec, options)
+        if not file_url and not file_base64:
+            fail("A PDF file is required for task=rotate")
+        preloaded = save_base64(file_base64) if file_base64 else None
+        file_bytes, filename = task_rotate(file_url, pages_spec, options, preloaded)
 
     elif task == "encrypt":
-        if not file_url:
-            fail("file_url is required for task=encrypt")
-        file_bytes, filename = task_encrypt(file_url, password, options)
+        if not file_url and not file_base64:
+            fail("A PDF file is required for task=encrypt")
+        preloaded = save_base64(file_base64) if file_base64 else None
+        file_bytes, filename = task_encrypt(file_url, password, options, preloaded)
 
     elif task == "decrypt":
-        if not file_url:
-            fail("file_url is required for task=decrypt")
-        file_bytes, filename = task_decrypt(file_url, password, options)
+        if not file_url and not file_base64:
+            fail("A PDF file is required for task=decrypt")
+        preloaded = save_base64(file_base64) if file_base64 else None
+        file_bytes, filename = task_decrypt(file_url, password, options, preloaded)
 
     elif task == "watermark":
-        if not file_url:
-            fail("file_url is required for task=watermark")
-        file_bytes, filename = task_watermark(file_url, options)
+        if not file_url and not file_base64:
+            fail("A PDF file is required for task=watermark")
+        preloaded = save_base64(file_base64) if file_base64 else None
+        file_bytes, filename = task_watermark(file_url, options, preloaded)
 
     else:
         fail(f"Unknown task '{task}'. Valid tasks: create, extract_text, merge, split, rotate, encrypt, decrypt, watermark")
