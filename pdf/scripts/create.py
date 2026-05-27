@@ -22,17 +22,36 @@ def fail(msg: str) -> None:
     sys.exit(1)
 
 # ── File helpers ───────────────────────────────────────────────────────────────
+def _internal_url(url: str) -> str | None:
+    """Rewrite a public media URL to the internal app URL."""
+    import urllib.parse
+    parsed = urllib.parse.urlparse(url)
+    if parsed.path.startswith("/media/"):
+        return f"{APP_URL}{parsed.path}"
+    return None
+
 def fetch_url(url: str, suffix: str = ".pdf") -> str:
     fd, path = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=30) as r, open(path, "wb") as f:
-            f.write(r.read())
-        return path
-    except Exception as exc:
-        os.unlink(path)
-        raise RuntimeError(f"Failed to fetch {url}: {exc}")
+    candidates = [url]
+    alt = _internal_url(url)
+    if alt and alt != url:
+        candidates.append(alt)
+    last_exc: Exception = RuntimeError("No URL to fetch")
+    for candidate in candidates:
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            if candidate.startswith(APP_URL) and MCP_KEY:
+                headers["X-MCP-Key"] = MCP_KEY
+            req = urllib.request.Request(candidate, headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as r, open(path, "wb") as f:
+                f.write(r.read())
+            return path
+        except Exception as exc:
+            last_exc = exc
+            continue
+    os.unlink(path)
+    raise RuntimeError(f"Failed to fetch PDF (tried {len(candidates)} URL(s)): {last_exc}")
 
 # ── LLM helper ────────────────────────────────────────────────────────────────
 def call_llm(messages: list[dict]) -> str:
@@ -365,6 +384,17 @@ def main():
         options = json.loads(raw_options) if isinstance(raw_options, str) else raw_options
     except json.JSONDecodeError:
         options = {}
+
+    # Infer task when the AI didn't set it explicitly
+    if not task:
+        if file_url or file_urls:
+            task = "extract_text"
+            think("Task not specified — defaulting to extract_text (file URL present)")
+        elif content:
+            task = "create"
+            think("Task not specified — defaulting to create (content present)")
+        else:
+            fail("Please specify a task: create, extract_text, merge, split, rotate, encrypt, decrypt, or watermark")
 
     think(f"Task: {task}")
 
